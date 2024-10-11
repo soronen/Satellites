@@ -23,12 +23,12 @@ endif()
 if (MSVC)
     target_compile_options(parallel PRIVATE 
         "/Qvec-report:2" 
-        # "/fp:fast" 
+        # "/O2"
+        "/fp:fast" 
         # "/arch:AVX2"     # Enables AVX2 (FMA3 will be used automatically if appropriate)
         # "/arch:AVX512"  
         #"/Ox"
         #"/GL"
-        # "/O2"
     )
 endif()
 
@@ -37,7 +37,7 @@ if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "Clan
         "-Rpass=loop-vectorize"
         "-Rpass-missed=loop-vectorize"
         "-Rpass-analysis=loop-vectorize"
-        # "-ffast-math"
+         "-ffast-math"
         # "-march=native"  # This will automatically enable both AVX2 and FMA3 based on the CPU
         # "-mavx2"         # Explicitly enable AVX2
         # "-mfma"          # Explicitly enable FMA3
@@ -54,8 +54,8 @@ endif()
 
 # UNCOMMENT THESE TO ENABLE OPENMP
 #
-# find_package(OpenMP REQUIRED)
-# target_link_libraries(parallel OpenMP::OpenMP_C)
+find_package(OpenMP REQUIRED)
+target_link_libraries(parallel OpenMP::OpenMP_C)
 
 
 # UNCOMMENT THESE TO ENABLE OPENCL
