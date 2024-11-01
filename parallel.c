@@ -25,7 +25,7 @@ VERSION 24.0 - port to SDL2
 
 #include <omp.h>
 
-#define CL_TARGET_OPENCL_VERSION 120
+#define CL_TARGET_OPENCL_VERSION 300
 
 #ifndef __APPLE__
 #include <CL/cl.h>
@@ -488,6 +488,8 @@ void init() {
 	}
 
 
+
+
 	free((void*)programSource);
 	free(platformId);
 	free(deviceIds);
@@ -584,41 +586,99 @@ void parallelPhysicsEngine() {
 // Rendering loop (This is called once a frame after physics engine) 
 // Decides the color for each pixel.
 void parallelGraphicsEngine() {
-	
-	cl_int status;
+
+}
 
 
-	status = clSetKernelArg(kernel, 0, sizeof(cl_mem), &pixelBuffer);
-	status |= clSetKernelArg(kernel, 1, sizeof(cl_mem), &satelliteBuffer);
-	status |= clSetKernelArg(kernel, 2, sizeof(int), &satelliteCount);
-	status |= clSetKernelArg(kernel, 3, sizeof(int), &windowWidth);
-	status |= clSetKernelArg(kernel, 4, sizeof(float), &blackHoleRadius);
-	status |= clSetKernelArg(kernel, 5, sizeof(float), &satelliteRadius);
-	status |= clSetKernelArg(kernel, 6, sizeof(int), &mousePosX);
-	status |= clSetKernelArg(kernel, 7, sizeof(int), &mousePosY);
-	if (status != CL_SUCCESS) {
-		printf("Error setting kernel arguments: %s\n", clErrorString(status));
-		return;
+void parallelGraphicsEngineLegacy() {
+
+
+
+
+	int tmpMousePosX = mousePosX;
+	int tmpMousePosY = mousePosY;
+
+	const float BLACK_HOLE_RADIUS_SQUARED = BLACK_HOLE_RADIUS * BLACK_HOLE_RADIUS;
+	const float SATELLITE_RADIUS_SQUARED = SATELLITE_RADIUS * SATELLITE_RADIUS;
+
+	// Graphics pixel loop
+	int i;
+#pragma omp parallel for
+	for (i = 0; i < SIZE; ++i) {
+
+		// Row wise ordering
+		floatvector pixel = { .x = i % WINDOW_WIDTH, .y = i / WINDOW_WIDTH };
+
+		// Draw the black hole
+		floatvector positionToBlackHole = { .x = pixel.x -
+		   tmpMousePosX, .y = pixel.y - tmpMousePosY };
+		float distToBlackHoleSquared =
+			positionToBlackHole.x * positionToBlackHole.x +
+			positionToBlackHole.y * positionToBlackHole.y;
+		//float distToBlackHole = sqrt(distToBlackHoleSquared);
+		if (distToBlackHoleSquared < BLACK_HOLE_RADIUS_SQUARED) {
+			pixels[i].red = 0;
+			pixels[i].green = 0;
+			pixels[i].blue = 0;
+			continue; // Black hole drawing done
+		}
+
+		// This color is used for coloring the pixel
+		color_f32 renderColor = { .red = 0.f, .green = 0.f, .blue = 0.f };
+
+		// Find closest satellite
+		float shortestDistanceSquared = INFINITY;
+
+		float weights = 0.f;
+		int hitsSatellite = 0;
+
+		// First Graphics satellite loop: Find the closest satellite.
+		for (int j = 0; j < SATELLITE_COUNT; ++j) {
+			floatvector difference = { .x = pixel.x - satellites[j].position.x,
+									  .y = pixel.y - satellites[j].position.y };
+			float distanceSquared = (difference.x * difference.x +
+				difference.y * difference.y);
+
+			if (distanceSquared < SATELLITE_RADIUS_SQUARED) {
+				renderColor.red = 1.0f;
+				renderColor.green = 1.0f;
+				renderColor.blue = 1.0f;
+				hitsSatellite = 1;
+				break;
+			}
+			else {
+				float weight = 1.0f / (distanceSquared * distanceSquared);
+				weights += weight;
+				if (distanceSquared < shortestDistanceSquared) {
+					shortestDistanceSquared = distanceSquared;
+					renderColor = satellites[j].identifier;
+				}
+			}
+		}
+
+		// Second graphics loop: Calculate the color based on distance to every satellite.
+		if (!hitsSatellite) {
+			for (int k = 0; k < SATELLITE_COUNT; ++k) {
+				floatvector difference = { .x = pixel.x - satellites[k].position.x,
+										  .y = pixel.y - satellites[k].position.y };
+				float dist2 = (difference.x * difference.x +
+					difference.y * difference.y);
+				float weight = 1.0f / (dist2 * dist2);
+
+				renderColor.red += (satellites[k].identifier.red *
+					weight / weights) * 3.0f;
+
+				renderColor.green += (satellites[k].identifier.green *
+					weight / weights) * 3.0f;
+
+				renderColor.blue += (satellites[k].identifier.blue *
+					weight / weights) * 3.0f;
+			}
+		}
+		pixels[i].red = (uint8_t)(renderColor.red * 255.0f);
+		pixels[i].green = (uint8_t)(renderColor.green * 255.0f);
+		pixels[i].blue = (uint8_t)(renderColor.blue * 255.0f);
 	}
-
-	size_t globalWorkSize[1] = { SIZE };
-	size_t localWorkSize[1] = { 64 };  // Adjust as per your device's preferred work-group size
-
-	// Enqueue kernel
-	status = clEnqueueNDRangeKernel(commandQueue, kernel, 1, NULL, globalWorkSize, localWorkSize, 0, NULL, NULL);
-	if (status != CL_SUCCESS) {
-		printf("Error enqueuing kernel: %s\n", clErrorString(status));
-		return;
-	}
-
-	// Read results back to host (optional, if you need to check the output)
-	status = clEnqueueReadBuffer(commandQueue, pixelBuffer, CL_TRUE, 0, sizeof(color_u8) * SIZE, pixels, 0, NULL, NULL);
-	if (status != CL_SUCCESS) {
-		printf("Error reading pixel buffer: %s\n", clErrorString(status));
-	}
-
-	// Finish the command queue to ensure completion
-	clFinish(commandQueue);
 }
 
 // ## You may add your own destrcution routines here ##
