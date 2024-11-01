@@ -23,18 +23,27 @@ typedef struct {
 } satellite;
 
 __kernel void graphicsKernel(
-    __global color_u8* pixels,
+	__global color_u8* pixels,  // in the buffer pixels are uchar values, but in kernel they are treated as floats for calculations
     __global satellite* satellites,
     int mousePosX,
     int mousePosY,
     float blackHoleRadiusSquared,
     float satelliteRadiusSquared,
-    int satelliteCount) {
+    int satelliteCount,
+	const int windowWidth,
+	const int windowHeight
+) {
+    // which pixel are we drawing to
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    int i = y * windowWidth + x;
+    floatvector pixel = (floatvector){ x, y };
 
-    int i = get_global_id(0);
-    floatvector pixel = (floatvector){ i % 1920, i / 1920 };
+	// If work group size isn't a perfect multiple of window size, some threads will be out of bounds
+    if (x >= windowWidth || y >= windowHeight) return;
 
-    // Black hole check
+
+	// Are inside the black hole? If so, the pixel is black
     floatvector positionToBlackHole = (floatvector){
         pixel.x - mousePosX,
         pixel.y - mousePosY
@@ -62,6 +71,7 @@ __kernel void graphicsKernel(
         float distanceSquared = difference.x * difference.x + difference.y * difference.y;
 
         if (distanceSquared < satelliteRadiusSquared) {
+			// if pixel is inside a satellite, color is white
             pixels[i] = (color_u8){ 255, 255, 255, 0 };
             hitsSatellite = 1;
             break;

@@ -60,12 +60,6 @@ target_link_libraries(parallel OpenMP::OpenMP_C)
  find_package(OpenCL REQUIRED)
  target_include_directories(parallel PRIVATE ${OpenCL_INCLUDE_DIRS})
  target_link_libraries(parallel ${OpenCL_LIBRARIES})
-#add_custom_command(
-#    TARGET parallel POST_BUILD
-#    COMMAND ${CMAKE_COMMAND} -E copy # remove copy_if_different.
-#    "${CMAKE_SOURCE_DIR}/parallel.cl"
-#    $<TARGET_FILE_DIR:parallel>
-#    VERBATIM)
 
 ## copy every parallel.cl every time
 add_custom_command(

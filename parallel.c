@@ -107,6 +107,18 @@ satellite* backupSatelites;
 
 
 // ## You may add your own variables here ##
+// def work group size
+#define WORK_GROUP_SIZE {1, 1}
+
+
+// set work group size
+size_t localWorkSize[2] = WORK_GROUP_SIZE;
+
+// global work size must be multiple of local work size and also depends on the window size....
+size_t globalWorkSize[2];
+
+
+
 int satelliteCount = SATELLITE_COUNT;
 int windowWidth = WINDOW_WIDTH;
 int windowHeight = WINDOW_HEIGHT;
@@ -117,7 +129,7 @@ float satelliteRadius = SATELLITE_RADIUS;
 cl_context context;
 cl_command_queue commandQueue;
 cl_program program;
-cl_kernel kernel;
+cl_kernel graphicsKernel;
 
 cl_mem pixelBuffer;
 cl_mem satelliteBuffer;
@@ -470,7 +482,7 @@ void init() {
 	}
 
 	// Create the graphicsKernel
-	kernel = clCreateKernel(program, "graphicsKernel", &status);
+	graphicsKernel = clCreateKernel(program, "graphicsKernel", &status);
 	if (status != CL_SUCCESS) {
 		printf("Kernel creation error: %s\n", clErrorString(status));
 	}
@@ -488,8 +500,26 @@ void init() {
 		abort();
 	}
 
+	// get max work group size, calculate how many threads will be out of bounds
+	size_t maxWorkGroupSize;
+	status = clGetDeviceInfo(deviceIds[DEVICE_INDEX], CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof(size_t), &maxWorkGroupSize, NULL);
+	if (status != CL_SUCCESS) {
+		printf("Error getting max work group size: %s\n", clErrorString(status));
+		abort();
+	}
+	printf("Max work group size: %d\n", maxWorkGroupSize);
 
 
+	globalWorkSize[0] = ((WINDOW_WIDTH + localWorkSize[0] - 1) / localWorkSize[0]) * localWorkSize[0];
+	globalWorkSize[1] = ((WINDOW_HEIGHT + localWorkSize[1] - 1) / localWorkSize[1]) * localWorkSize[1];
+	size_t totalWorkItems = globalWorkSize[0] * globalWorkSize[1];
+	printf("Total work items: %d\n", totalWorkItems);
+
+	size_t totalValidPixels = windowWidth * windowHeight;
+	printf("Total valid pixels: %d\n", totalValidPixels);
+
+	size_t outOfBoundsThreads = totalWorkItems - totalValidPixels;
+	printf("Out of bounds threads: %d\n", outOfBoundsThreads);
 
 	free((void*)programSource);
 	free(platformId);
@@ -598,31 +628,37 @@ void parallelGraphicsEngine() {
     }
 
     // Set kernel arguments
-    status = clSetKernelArg(kernel, 0, sizeof(cl_mem), &pixelBuffer);
-    status |= clSetKernelArg(kernel, 1, sizeof(cl_mem), &satelliteBuffer);
-    status |= clSetKernelArg(kernel, 2, sizeof(int), &mousePosX);
-    status |= clSetKernelArg(kernel, 3, sizeof(int), &mousePosY);
+    status = clSetKernelArg(graphicsKernel, 0, sizeof(cl_mem), &pixelBuffer);
+    status |= clSetKernelArg(graphicsKernel, 1, sizeof(cl_mem), &satelliteBuffer);
+    status |= clSetKernelArg(graphicsKernel, 2, sizeof(int), &mousePosX);
+    status |= clSetKernelArg(graphicsKernel, 3, sizeof(int), &mousePosY);
     float blackHoleRadiusSquared = BLACK_HOLE_RADIUS * BLACK_HOLE_RADIUS;
-    status |= clSetKernelArg(kernel, 4, sizeof(float), &blackHoleRadiusSquared);
+    status |= clSetKernelArg(graphicsKernel, 4, sizeof(float), &blackHoleRadiusSquared);
     float satelliteRadiusSquared = SATELLITE_RADIUS * SATELLITE_RADIUS;
-    status |= clSetKernelArg(kernel, 5, sizeof(float), &satelliteRadiusSquared);
-    status |= clSetKernelArg(kernel, 6, sizeof(int), &satelliteCount);
+    status |= clSetKernelArg(graphicsKernel, 5, sizeof(float), &satelliteRadiusSquared);
+    status |= clSetKernelArg(graphicsKernel, 6, sizeof(int), &satelliteCount);
+	status |= clSetKernelArg(graphicsKernel, 7, sizeof(int), &windowWidth);
+	status |= clSetKernelArg(graphicsKernel, 8, sizeof(int), &windowHeight);
+
+
     
     if (status != CL_SUCCESS) {
         printf("Error setting kernel arguments: %s\n", clErrorString(status));
         abort();
     }
+	
 
-    // Execute kernel
-    size_t globalWorkSize = SIZE;
-    status = clEnqueueNDRangeKernel(commandQueue, kernel, 1, NULL,
-        &globalWorkSize, NULL, 0, NULL, NULL);
+	// Execute graphicskernel
+
+	status = clEnqueueNDRangeKernel(commandQueue, graphicsKernel, 2, NULL,
+		globalWorkSize, localWorkSize, 0, NULL, NULL);
+
     if (status != CL_SUCCESS) {
         printf("Error executing kernel: %s\n", clErrorString(status));
         abort();
     }
 
-    // Read back results
+	// Read back results from the pixel buffer after kernel execution
     status = clEnqueueReadBuffer(commandQueue, pixelBuffer, CL_TRUE, 0,
         sizeof(color_u8) * SIZE, pixels, 0, NULL, NULL);
     if (status != CL_SUCCESS) {
@@ -632,108 +668,15 @@ void parallelGraphicsEngine() {
 }
 
 
-void parallelGraphicsEngineLegacy() {
-
-	int tmpMousePosX = mousePosX;
-	int tmpMousePosY = mousePosY;
-
-	const float BLACK_HOLE_RADIUS_SQUARED = BLACK_HOLE_RADIUS * BLACK_HOLE_RADIUS;
-	const float SATELLITE_RADIUS_SQUARED = SATELLITE_RADIUS * SATELLITE_RADIUS;
-
-	// Graphics pixel loop
-	int i;
-#pragma omp parallel for
-	for (i = 0; i < SIZE; ++i) {
-
-		// Row wise ordering
-		floatvector pixel = { .x = i % WINDOW_WIDTH, .y = i / WINDOW_WIDTH };
-
-		// Draw the black hole
-		floatvector positionToBlackHole = { .x = pixel.x -
-		   tmpMousePosX, .y = pixel.y - tmpMousePosY };
-		float distToBlackHoleSquared =
-			positionToBlackHole.x * positionToBlackHole.x +
-			positionToBlackHole.y * positionToBlackHole.y;
-		//float distToBlackHole = sqrt(distToBlackHoleSquared);
-		if (distToBlackHoleSquared < BLACK_HOLE_RADIUS_SQUARED) {
-			pixels[i].red = 0;
-			pixels[i].green = 0;
-			pixels[i].blue = 0;
-			continue; // Black hole drawing done
-		}
-
-		// This color is used for coloring the pixel
-		color_f32 renderColor = { .red = 0.f, .green = 0.f, .blue = 0.f };
-
-		// Find closest satellite
-		float shortestDistanceSquared = INFINITY;
-
-		float weights = 0.f;
-		int hitsSatellite = 0;
-
-		// First Graphics satellite loop: Find the closest satellite.
-		for (int j = 0; j < SATELLITE_COUNT; ++j) {
-			floatvector difference = { .x = pixel.x - satellites[j].position.x,
-									  .y = pixel.y - satellites[j].position.y };
-			float distanceSquared = (difference.x * difference.x +
-				difference.y * difference.y);
-
-			if (distanceSquared < SATELLITE_RADIUS_SQUARED) {
-				renderColor.red = 1.0f;
-				renderColor.green = 1.0f;
-				renderColor.blue = 1.0f;
-				hitsSatellite = 1;
-				break;
-			}
-			else {
-				float weight = 1.0f / (distanceSquared * distanceSquared);
-				weights += weight;
-				if (distanceSquared < shortestDistanceSquared) {
-					shortestDistanceSquared = distanceSquared;
-					renderColor = satellites[j].identifier;
-				}
-			}
-		}
-
-		// Second graphics loop: Calculate the color based on distance to every satellite.
-		if (!hitsSatellite) {
-			for (int k = 0; k < SATELLITE_COUNT; ++k) {
-				floatvector difference = { .x = pixel.x - satellites[k].position.x,
-										  .y = pixel.y - satellites[k].position.y };
-				float dist2 = (difference.x * difference.x +
-					difference.y * difference.y);
-				float weight = 1.0f / (dist2 * dist2);
-
-				renderColor.red += (satellites[k].identifier.red *
-					weight / weights) * 3.0f;
-
-				renderColor.green += (satellites[k].identifier.green *
-					weight / weights) * 3.0f;
-
-				renderColor.blue += (satellites[k].identifier.blue *
-					weight / weights) * 3.0f;
-			}
-		}
-		pixels[i].red = (uint8_t)(renderColor.red * 255.0f);
-		pixels[i].green = (uint8_t)(renderColor.green * 255.0f);
-		pixels[i].blue = (uint8_t)(renderColor.blue * 255.0f);
-	}
-}
-
 // ## You may add your own destrcution routines here ##
 void destroy() {
 	clReleaseMemObject(pixelBuffer);
 	clReleaseMemObject(satelliteBuffer);
-	clReleaseKernel(kernel);
+	clReleaseKernel(graphicsKernel);
 	clReleaseProgram(program);
 	clReleaseCommandQueue(commandQueue);
 	clReleaseContext(context);
 }
-
-
-
-
-
 
 
 ////////////////////////////////////////////////
