@@ -10,34 +10,14 @@ add_executable(parallel parallel.c)
 # target_compile_options(parallel PRIVATE "add-your-option-here")
 # target_compile_options(parallel PRIVATE "add-your-second-option-here")
 
-# merely log vectorization reports 
-if (MSVC)
-    target_compile_options(parallel PRIVATE "/Qvec-report:2")
-endif()
-
-if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
-    target_compile_options(parallel PRIVATE "-Rpass=loop-vectorize" "-Rpass-missed=loop-vectorize" "-Rpass-analysis=loop-vectorize")
-endif()
-
-# enable performance related flags
-if (MSVC)
-    target_compile_options(parallel PRIVATE 
-        "/Qvec-report:2" 
-        # "/O2"
-        "/fp:fast" 
-        # "/arch:AVX2"     # Enables AVX2 (FMA3 will be used automatically if appropriate)
-        # "/arch:AVX512"  
-        #"/Ox"
-        #"/GL"
-    )
-endif()
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
     target_compile_options(parallel PRIVATE 
-        "-Rpass=loop-vectorize"
-        "-Rpass-missed=loop-vectorize"
-        "-Rpass-analysis=loop-vectorize"
+         "-Xclang"
          "-ffast-math"
+        #"-Rpass=loop-vectorize"
+        #"-Rpass-missed=loop-vectorize"
+        #"-Rpass-analysis=loop-vectorize"
         # "-march=native"  # This will automatically enable both AVX2 and FMA3 based on the CPU
         # "-mavx2"         # Explicitly enable AVX2
         # "-mfma"          # Explicitly enable FMA3
@@ -48,6 +28,18 @@ if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "Clan
         # "-fomit-frame-pointer"
         # "-fno-strict-aliasing"
         # "-funsafe-loop-optimizations"
+    )
+endif()
+
+if (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC" OR CMAKE_C_COMPILER_ID STREQUAL "MSVC")
+    target_compile_options(parallel PRIVATE 
+        "/Qvec-report:2" 
+        # "/O2"
+        "/fp:fast" 
+        # "/arch:AVX2"     # Enables AVX2 (FMA3 will be used automatically if appropriate)
+        # "/arch:AVX512"  
+        #"/Ox"
+        #"/GL"
     )
 endif()
 
@@ -64,17 +56,22 @@ target_link_libraries(parallel OpenMP::OpenMP_C)
 # the parallel.cl, but leave the parallel.c untouched.
 # Because of this, you might need to force 'Rebuild All' to ensure kernel code updates propagate
 # to the build directory. If you know enough CMake magic, feel free to fix this and let me know.
-#
-# find_package(OpenCL REQUIRED)
-# target_include_directories(parallel PRIVATE ${OpenCL_INCLUDE_DIRS})
-# target_link_libraries(parallel ${OpenCL_LIBRARIES})
-# add_custom_command(
-#     TARGET parallel POST_BUILD
-#     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-#     "${CMAKE_SOURCE_DIR}/parallel.cl"
-#     $<TARGET_FILE_DIR:parallel>
-#     VERBATIM)
 
+ find_package(OpenCL REQUIRED)
+ target_include_directories(parallel PRIVATE ${OpenCL_INCLUDE_DIRS})
+ target_link_libraries(parallel ${OpenCL_LIBRARIES})
+
+## copy every parallel.cl every time
+add_custom_command(
+    OUTPUT "${CMAKE_BINARY_DIR}/parallel.cl"
+    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/parallel.cl" "${CMAKE_BINARY_DIR}"
+    DEPENDS "${CMAKE_SOURCE_DIR}/parallel.cl"
+    VERBATIM
+)
+
+# Add this output to the list of dependencies for the parallel target
+add_custom_target(copy_parallel_cl ALL DEPENDS "${CMAKE_BINARY_DIR}/parallel.cl")
+add_dependencies(parallel copy_parallel_cl)
 
 # Find and link SDL2
 if (WIN32)

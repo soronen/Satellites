@@ -25,12 +25,20 @@ VERSION 24.0 - port to SDL2
 
 #include <omp.h>
 
+#define CL_TARGET_OPENCL_VERSION 300
+
+#ifndef __APPLE__
+#include <CL/cl.h>
+#else
+#include <OpenCL/cl.h>
+#endif
+
 int mousePosX;
 int mousePosY;
 
 // These are used to decide the window size
-#define WINDOW_HEIGHT 1024
 #define WINDOW_WIDTH  1920
+#define WINDOW_HEIGHT 1080
 #define SIZE WINDOW_WIDTH*WINDOW_HEIGHT
 
 // The number of satellites can be changed to see how it affects performance.
@@ -99,6 +107,291 @@ satellite* backupSatelites;
 
 
 // ## You may add your own variables here ##
+// def work group size
+#define WORK_GROUP_SIZE {16, 16}
+
+
+// set work group size
+size_t localWorkSize[2] = WORK_GROUP_SIZE;
+
+// global work size must be multiple of local work size and also depends on the window size....
+size_t globalWorkSize[2];
+
+
+
+int satelliteCount = SATELLITE_COUNT;
+int windowWidth = WINDOW_WIDTH;
+int windowHeight = WINDOW_HEIGHT;
+float blackHoleRadius = BLACK_HOLE_RADIUS;
+float satelliteRadius = SATELLITE_RADIUS;
+
+
+cl_context context;
+cl_command_queue commandQueue;
+cl_program program;
+cl_kernel graphicsKernel;
+
+cl_mem pixelBuffer;
+cl_mem satelliteBuffer;
+
+const int PLATFORM_INDEX = 0;
+const int DEVICE_INDEX = 0;
+
+const char* openclErrors[] = {
+	"Success!",
+	"Device not found.",
+	"Device not available",
+	"Compiler not available",
+	"Memory object allocation failure",
+	"Out of resources",
+	"Out of host memory",
+	"Profiling information not available",
+	"Memory copy overlap",
+	"Image format mismatch",
+	"Image format not supported",
+	"Program build failure",
+	"Map failure",
+	"Invalid value",
+	"Invalid device type",
+	"Invalid platform",
+	"Invalid device",
+	"Invalid context",
+	"Invalid queue properties",
+	"Invalid command queue",
+	"Invalid host pointer",
+	"Invalid memory object",
+	"Invalid image format descriptor",
+	"Invalid image size",
+	"Invalid sampler",
+	"Invalid binary",
+	"Invalid build options",
+	"Invalid program",
+	"Invalid program executable",
+	"Invalid kernel name",
+	"Invalid kernel definition",
+	"Invalid kernel",
+	"Invalid argument index",
+	"Invalid argument value",
+	"Invalid argument size",
+	"Invalid kernel arguments",
+	"Invalid work dimension",
+	"Invalid work group size",
+	"Invalid work item size",
+	"Invalid global offset",
+	"Invalid event wait list",
+	"Invalid event",
+	"Invalid operation",
+	"Invalid OpenGL object",
+	"Invalid buffer size",
+	"Invalid mip-map level",
+	"Unknown",
+};
+
+
+const char* clErrorString(cl_int e)
+{
+	switch (e) {
+	case CL_SUCCESS:                            return openclErrors[0];
+	case CL_DEVICE_NOT_FOUND:                   return openclErrors[1];
+	case CL_DEVICE_NOT_AVAILABLE:               return openclErrors[2];
+	case CL_COMPILER_NOT_AVAILABLE:             return openclErrors[3];
+	case CL_MEM_OBJECT_ALLOCATION_FAILURE:      return openclErrors[4];
+	case CL_OUT_OF_RESOURCES:                   return openclErrors[5];
+	case CL_OUT_OF_HOST_MEMORY:                 return openclErrors[6];
+	case CL_PROFILING_INFO_NOT_AVAILABLE:       return openclErrors[7];
+	case CL_MEM_COPY_OVERLAP:                   return openclErrors[8];
+	case CL_IMAGE_FORMAT_MISMATCH:              return openclErrors[9];
+	case CL_IMAGE_FORMAT_NOT_SUPPORTED:         return openclErrors[10];
+	case CL_BUILD_PROGRAM_FAILURE:              return openclErrors[11];
+	case CL_MAP_FAILURE:                        return openclErrors[12];
+	case CL_INVALID_VALUE:                      return openclErrors[13];
+	case CL_INVALID_DEVICE_TYPE:                return openclErrors[14];
+	case CL_INVALID_PLATFORM:                   return openclErrors[15];
+	case CL_INVALID_DEVICE:                     return openclErrors[16];
+	case CL_INVALID_CONTEXT:                    return openclErrors[17];
+	case CL_INVALID_QUEUE_PROPERTIES:           return openclErrors[18];
+	case CL_INVALID_COMMAND_QUEUE:              return openclErrors[19];
+	case CL_INVALID_HOST_PTR:                   return openclErrors[20];
+	case CL_INVALID_MEM_OBJECT:                 return openclErrors[21];
+	case CL_INVALID_IMAGE_FORMAT_DESCRIPTOR:    return openclErrors[22];
+	case CL_INVALID_IMAGE_SIZE:                 return openclErrors[23];
+	case CL_INVALID_SAMPLER:                    return openclErrors[24];
+	case CL_INVALID_BINARY:                     return openclErrors[25];
+	case CL_INVALID_BUILD_OPTIONS:              return openclErrors[26];
+	case CL_INVALID_PROGRAM:                    return openclErrors[27];
+	case CL_INVALID_PROGRAM_EXECUTABLE:         return openclErrors[28];
+	case CL_INVALID_KERNEL_NAME:                return openclErrors[29];
+	case CL_INVALID_KERNEL_DEFINITION:          return openclErrors[30];
+	case CL_INVALID_KERNEL:                     return openclErrors[31];
+	case CL_INVALID_ARG_INDEX:                  return openclErrors[32];
+	case CL_INVALID_ARG_VALUE:                  return openclErrors[33];
+	case CL_INVALID_ARG_SIZE:                   return openclErrors[34];
+	case CL_INVALID_KERNEL_ARGS:                return openclErrors[35];
+	case CL_INVALID_WORK_DIMENSION:             return openclErrors[36];
+	case CL_INVALID_WORK_GROUP_SIZE:            return openclErrors[37];
+	case CL_INVALID_WORK_ITEM_SIZE:             return openclErrors[38];
+	case CL_INVALID_GLOBAL_OFFSET:              return openclErrors[39];
+	case CL_INVALID_EVENT_WAIT_LIST:            return openclErrors[40];
+	case CL_INVALID_EVENT:                      return openclErrors[41];
+	case CL_INVALID_OPERATION:                  return openclErrors[42];
+	case CL_INVALID_GL_OBJECT:                  return openclErrors[43];
+	case CL_INVALID_BUFFER_SIZE:                return openclErrors[44];
+	case CL_INVALID_MIP_LEVEL:                  return openclErrors[45];
+	default:                                    return openclErrors[46];
+	}
+}
+// This function reads in a text file and stores it as a char pointer
+char*
+readSource(char* kernelPath) {
+	cl_int status;
+	FILE* fp;
+	char* source;
+	long int size;
+	printf("Program file is: %s\n", kernelPath);
+	fp = fopen(kernelPath, "rb");
+	if (!fp) {
+		printf("Could not open kernel file\n");
+		exit(-1);
+	}
+	status = fseek(fp, 0, SEEK_END);
+	if (status != 0) {
+		printf("Error seeking to end of file\n");
+		exit(-1);
+	}
+	size = ftell(fp);
+	if (size < 0) {
+		printf("Error getting file position\n");
+		exit(-1);
+	}
+	rewind(fp);
+	source = (char*)malloc(size + 1);
+	if (source == NULL) {
+		printf("Error allocating space for the kernel source\n");
+		exit(-1);
+	}
+	size_t readBytes = fread(source, 1, size, fp);
+	if ((long int)readBytes != size) {
+		printf("Error reading the kernel file\n");
+		exit(-1);
+	}
+	source[size] = '\0';
+	fclose(fp);
+	return source;
+}
+
+// Informational printing
+void
+printPlatformInfo(cl_platform_id* platformId, size_t ret_num_platforms) {
+	size_t infoLength = 0;
+	char* infoStr = NULL;
+	cl_int status;
+	for (unsigned int r = 0; r < (unsigned int)ret_num_platforms; ++r) {
+		printf("Platform %d information:\n", r);
+		status = clGetPlatformInfo(platformId[r], CL_PLATFORM_PROFILE, 0, NULL, &infoLength);
+		if (status != CL_SUCCESS) {
+			printf("Platform profile length error: %s\n", clErrorString(status));
+		}
+		infoStr = malloc((infoLength) * sizeof(char));
+		status = clGetPlatformInfo(platformId[r], CL_PLATFORM_PROFILE, infoLength, infoStr, NULL);
+		if (status != CL_SUCCESS) {
+			printf("Platform profile info error: %s\n", clErrorString(status));
+		}
+		printf("\tProfile: %s\n", infoStr);
+		free(infoStr);
+		status = clGetPlatformInfo(platformId[r], CL_PLATFORM_VERSION, 0, NULL, &infoLength);
+		if (status != CL_SUCCESS) {
+			printf("Platform version length error: %s\n", clErrorString(status));
+		}
+		infoStr = malloc((infoLength) * sizeof(char));
+		status = clGetPlatformInfo(platformId[r], CL_PLATFORM_VERSION, infoLength, infoStr, NULL);
+		if (status != CL_SUCCESS) {
+			printf("Platform version info error: %s\n", clErrorString(status));
+		}
+		printf("\tVersion: %s\n", infoStr);
+		free(infoStr);
+		status = clGetPlatformInfo(platformId[r], CL_PLATFORM_NAME, 0, NULL, &infoLength);
+		if (status != CL_SUCCESS) {
+			printf("Platform name length error: %s\n", clErrorString(status));
+		}
+		infoStr = malloc((infoLength) * sizeof(char));
+		status = clGetPlatformInfo(platformId[r], CL_PLATFORM_NAME, infoLength, infoStr, NULL);
+		if (status != CL_SUCCESS) {
+			printf("Platform name info error: %s\n", clErrorString(status));
+		}
+		printf("\tName: %s\n", infoStr);
+		free(infoStr);
+		status = clGetPlatformInfo(platformId[r], CL_PLATFORM_VENDOR, 0, NULL, &infoLength);
+		if (status != CL_SUCCESS) {
+			printf("Platform vendor info length error: %s\n", clErrorString(status));
+		}
+		infoStr = malloc((infoLength) * sizeof(char));
+		status = clGetPlatformInfo(platformId[r], CL_PLATFORM_VENDOR, infoLength, infoStr, NULL);
+		if (status != CL_SUCCESS) {
+			printf("Platform vendor info error: %s\n", clErrorString(status));
+		}
+		printf("\tVendor: %s\n", infoStr);
+		free(infoStr);
+		status = clGetPlatformInfo(platformId[r], CL_PLATFORM_EXTENSIONS, 0, NULL, &infoLength);
+		if (status != CL_SUCCESS) {
+			printf("Platform extensions info length error: %s\n", clErrorString(status));
+		}
+		infoStr = malloc((infoLength) * sizeof(char));
+		status = clGetPlatformInfo(platformId[r], CL_PLATFORM_EXTENSIONS, infoLength, infoStr, NULL);
+		if (status != CL_SUCCESS) {
+			printf("Platform extensions info error: %s\n", clErrorString(status));
+		}
+		printf("\tExtensions: %s\n", infoStr);
+		free(infoStr);
+	}
+	printf("\nUsing Platform %d.\n", PLATFORM_INDEX);
+}
+
+// Informational printing
+void
+printDeviceInfo(cl_device_id* deviceIds, size_t ret_num_devices) {
+	// Print info about the devices
+	size_t infoLength = 0;
+	char* infoStr = NULL;
+	cl_int status;
+
+	for (unsigned int r = 0; r < ret_num_devices; ++r) {
+		printf("Device %d indormation:\n", r);
+		status = clGetDeviceInfo(deviceIds[r], CL_DEVICE_VENDOR, 0, NULL, &infoLength);
+		if (status != CL_SUCCESS) {
+			printf("Device Vendor info length error: %s\n", clErrorString(status));
+		}
+		infoStr = malloc((infoLength) * sizeof(char));
+		status = clGetDeviceInfo(deviceIds[r], CL_DEVICE_VENDOR, infoLength, infoStr, NULL);
+		if (status != CL_SUCCESS) {
+			printf("Device Vendor info error: %s\n", clErrorString(status));
+		}
+		printf("\tVendor: %s\n", infoStr);
+		free(infoStr);
+		status = clGetDeviceInfo(deviceIds[r], CL_DEVICE_NAME, 0, NULL, &infoLength);
+		if (status != CL_SUCCESS) {
+			printf("Device name info length error: %s\n", clErrorString(status));
+		}
+		infoStr = malloc((infoLength) * sizeof(char));
+		status = clGetDeviceInfo(deviceIds[r], CL_DEVICE_NAME, infoLength, infoStr, NULL);
+		if (status != CL_SUCCESS) {
+			printf("Device name info error: %s\n", clErrorString(status));
+		}
+		printf("\tName: %s\n", infoStr);
+		free(infoStr);
+		status = clGetDeviceInfo(deviceIds[r], CL_DEVICE_VERSION, 0, NULL, &infoLength);
+		if (status != CL_SUCCESS) {
+			printf("Device version info length error: %s\n", clErrorString(status));
+		}
+		infoStr = malloc((infoLength) * sizeof(char));
+		status = clGetDeviceInfo(deviceIds[r], CL_DEVICE_VERSION, infoLength, infoStr, NULL);
+		if (status != CL_SUCCESS) {
+			printf("Device version info error: %s\n", clErrorString(status));
+		}
+		printf("\tVersion: %s\n", infoStr);
+		free(infoStr);
+	}
+	printf("\nUsing Device %d.\n", DEVICE_INDEX);
+}
 
 
 
@@ -106,7 +399,136 @@ satellite* backupSatelites;
 // ## You may add your own initialization routines here ##
 void init() {
 
+	// Start the OpenCL initialization
+	cl_int status;  // Use this to check the output of each API call
 
+	// Get available OpenCL platforms
+	cl_uint ret_num_platforms;
+	status = clGetPlatformIDs(0, NULL, &ret_num_platforms);
+	if (status != CL_SUCCESS) {
+		printf("Error getting the number of platforms: %s", clErrorString(status));
+	}
+	cl_platform_id* platformId = malloc(sizeof(cl_platform_id) * ret_num_platforms);
+	status = clGetPlatformIDs(ret_num_platforms, platformId, NULL);
+	if (status != CL_SUCCESS) {
+		printf("Error getting the platforms: %s", clErrorString(status));
+	}
+
+	// Print info about the platform. Not needed for functionality,
+	// but nice to see in order to confirm your OpenCL installation
+	printPlatformInfo(platformId, ret_num_platforms);
+
+	// Get available devices
+	cl_uint ret_num_devices = 0;
+	status = clGetDeviceIDs(
+		platformId[PLATFORM_INDEX], CL_DEVICE_TYPE_ALL, 0, NULL, &ret_num_devices);
+	if (status != CL_SUCCESS) {
+		printf("Error getting the number of devices: %s", clErrorString(status));
+	}
+	cl_device_id* deviceIds = malloc((ret_num_devices) * sizeof(cl_device_id));
+	status = clGetDeviceIDs(
+		platformId[PLATFORM_INDEX], CL_DEVICE_TYPE_ALL, ret_num_devices, deviceIds, &ret_num_devices);
+	if (status != CL_SUCCESS) {
+		printf("Error getting device ids: %s", clErrorString(status));
+	}
+
+	// Again, this only prints nice-to-know information
+	printDeviceInfo(deviceIds, ret_num_devices);
+
+	context = clCreateContext(NULL, 1, &(deviceIds[DEVICE_INDEX]), NULL, NULL, &status);
+	if (status != CL_SUCCESS) {
+		printf("Context creation error: %s\n", clErrorString(status));
+	}
+
+	// In order command queue
+	// Using the 1.2 clCreateCommandQueue API since it's bit simpler,
+	// this was later deprecated in OpenCL 2.0
+	commandQueue = clCreateCommandQueue(context, deviceIds[DEVICE_INDEX], 0, &status);
+
+	if (status != CL_SUCCESS) {
+		printf("Command queue creation error: %s", clErrorString(status));
+	}
+
+	// Make kernel string into a program
+	const char* programSource = readSource("parallel.cl");
+	program = clCreateProgramWithSource(context, 1, &programSource, NULL, &status);
+	if (status != CL_SUCCESS) {
+		printf("Program creation error: %s", clErrorString(status));
+	}
+
+	// Program compiling
+	status = clBuildProgram(program, 1, &deviceIds[DEVICE_INDEX], NULL, NULL, NULL);
+	if (status != CL_SUCCESS) {
+		printf("OpenCL build error: %s\n", clErrorString(status));
+		// Fetch build errors if there were some.
+		if (status == CL_BUILD_PROGRAM_FAILURE) {
+			size_t infoLength = 0;
+			cl_int cl_build_status = clGetProgramBuildInfo(
+				program, deviceIds[DEVICE_INDEX], CL_PROGRAM_BUILD_LOG, 0, 0, &infoLength);
+			if (cl_build_status != CL_SUCCESS) {
+				printf("Build log length fetch error: %s\n", clErrorString(cl_build_status));
+			}
+			char* infoStr = malloc(infoLength * sizeof(char));
+			cl_build_status = clGetProgramBuildInfo(
+				program, deviceIds[DEVICE_INDEX], CL_PROGRAM_BUILD_LOG, infoLength, infoStr, 0);
+			if (cl_build_status != CL_SUCCESS) {
+				printf("Build log fetch error: %s\n", clErrorString(cl_build_status));
+			}
+
+			printf("OpenCL build log:\n %s", infoStr);
+			free(infoStr);
+		}
+		abort();
+	}
+
+	// Create the graphicsKernel
+	graphicsKernel = clCreateKernel(program, "graphicsKernel", &status);
+	if (status != CL_SUCCESS) {
+		printf("Kernel creation error: %s\n", clErrorString(status));
+	}
+
+	// create buffers
+	satelliteBuffer = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(satellite) * SATELLITE_COUNT, NULL, &status);
+	if (status != CL_SUCCESS) {
+		printf("Error creating satellite buffer: %s\n", clErrorString(status));
+		abort();
+	}
+
+	pixelBuffer = clCreateBuffer(context, CL_MEM_WRITE_ONLY, sizeof(color_u8) * SIZE, NULL, &status);
+	if (status != CL_SUCCESS) {
+		printf("Error creating pixel buffer: %s\n", clErrorString(status));
+		abort();
+	}
+
+	// get max work group size, calculate how many threads will be out of bounds
+	size_t maxWorkGroupSize;
+	status = clGetDeviceInfo(deviceIds[DEVICE_INDEX], CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof(size_t), &maxWorkGroupSize, NULL);
+	if (status != CL_SUCCESS) {
+		printf("Error getting max work group size: %s\n", clErrorString(status));
+		abort();
+	}
+	printf("Max work group size: %d\n", maxWorkGroupSize);
+
+	if (localWorkSize[0] * localWorkSize[1] > maxWorkGroupSize) {
+		printf("Error: Work group size exceeds the maximum supported size of %zu\n", maxWorkGroupSize);
+		abort();
+	}
+
+	// pad the global work size to be multiple of local work size
+	globalWorkSize[0] = ((WINDOW_WIDTH + localWorkSize[0] - 1) / localWorkSize[0]) * localWorkSize[0];
+	globalWorkSize[1] = ((WINDOW_HEIGHT + localWorkSize[1] - 1) / localWorkSize[1]) * localWorkSize[1];
+	size_t totalWorkItems = globalWorkSize[0] * globalWorkSize[1];
+	printf("Total work items: %d\n", totalWorkItems);
+
+	size_t totalValidPixels = windowWidth * windowHeight;
+	printf("Total valid pixels: %d\n", totalValidPixels);
+
+	size_t outOfBoundsThreads = totalWorkItems - totalValidPixels;
+	printf("Out of bounds threads: %d\n", outOfBoundsThreads);
+
+	free((void*)programSource);
+	free(platformId);
+	free(deviceIds);
 }
 
 // ## You are asked to make this code parallel ##
@@ -200,103 +622,66 @@ void parallelPhysicsEngine() {
 // Rendering loop (This is called once a frame after physics engine) 
 // Decides the color for each pixel.
 void parallelGraphicsEngine() {
+    cl_int status;
 
-	int tmpMousePosX = mousePosX;
-	int tmpMousePosY = mousePosY;
+    // Write satellite data to GPU
+    status = clEnqueueWriteBuffer(commandQueue, satelliteBuffer, CL_TRUE, 0,
+        sizeof(satellite) * SATELLITE_COUNT, satellites, 0, NULL, NULL);
+    if (status != CL_SUCCESS) {
+        printf("Error writing satellite data: %s\n", clErrorString(status));
+        abort();
+    }
 
-	const float BLACK_HOLE_RADIUS_SQUARED = BLACK_HOLE_RADIUS * BLACK_HOLE_RADIUS;
-	const float SATELLITE_RADIUS_SQUARED = SATELLITE_RADIUS * SATELLITE_RADIUS;
+    // Set kernel arguments
+    status = clSetKernelArg(graphicsKernel, 0, sizeof(cl_mem), &pixelBuffer);
+    status |= clSetKernelArg(graphicsKernel, 1, sizeof(cl_mem), &satelliteBuffer);
+    status |= clSetKernelArg(graphicsKernel, 2, sizeof(int), &mousePosX);
+    status |= clSetKernelArg(graphicsKernel, 3, sizeof(int), &mousePosY);
+    float blackHoleRadiusSquared = BLACK_HOLE_RADIUS * BLACK_HOLE_RADIUS;
+    status |= clSetKernelArg(graphicsKernel, 4, sizeof(float), &blackHoleRadiusSquared);
+    float satelliteRadiusSquared = SATELLITE_RADIUS * SATELLITE_RADIUS;
+    status |= clSetKernelArg(graphicsKernel, 5, sizeof(float), &satelliteRadiusSquared);
+    status |= clSetKernelArg(graphicsKernel, 6, sizeof(int), &satelliteCount);
+	status |= clSetKernelArg(graphicsKernel, 7, sizeof(int), &windowWidth);
+	status |= clSetKernelArg(graphicsKernel, 8, sizeof(int), &windowHeight);
 
-	// Graphics pixel loop
-	int i;
-#pragma omp parallel for
-	for (i = 0; i < SIZE; ++i) {
 
-		// Row wise ordering
-		floatvector pixel = { .x = i % WINDOW_WIDTH, .y = i / WINDOW_WIDTH };
+    
+    if (status != CL_SUCCESS) {
+        printf("Error setting kernel arguments: %s\n", clErrorString(status));
+        abort();
+    }
+	
 
-		// Draw the black hole
-		floatvector positionToBlackHole = { .x = pixel.x -
-		   tmpMousePosX, .y = pixel.y - tmpMousePosY };
-		float distToBlackHoleSquared =
-			positionToBlackHole.x * positionToBlackHole.x +
-			positionToBlackHole.y * positionToBlackHole.y;
-		//float distToBlackHole = sqrt(distToBlackHoleSquared);
-		if (distToBlackHoleSquared < BLACK_HOLE_RADIUS_SQUARED) {
-			pixels[i].red = 0;
-			pixels[i].green = 0;
-			pixels[i].blue = 0;
-			continue; // Black hole drawing done
-		}
+	// Execute graphicskernel
 
-		// This color is used for coloring the pixel
-		color_f32 renderColor = { .red = 0.f, .green = 0.f, .blue = 0.f };
+	status = clEnqueueNDRangeKernel(commandQueue, graphicsKernel, 2, NULL,
+		globalWorkSize, localWorkSize, 0, NULL, NULL);
 
-		// Find closest satellite
-		float shortestDistanceSquared = INFINITY;
+    if (status != CL_SUCCESS) {
+        printf("Error executing kernel: %s\n", clErrorString(status));
+        abort();
+    }
 
-		float weights = 0.f;
-		int hitsSatellite = 0;
-
-		// First Graphics satellite loop: Find the closest satellite.
-		for (int j = 0; j < SATELLITE_COUNT; ++j) {
-			floatvector difference = { .x = pixel.x - satellites[j].position.x,
-									  .y = pixel.y - satellites[j].position.y };
-			float distanceSquared = (difference.x * difference.x +
-				difference.y * difference.y);
-
-			if (distanceSquared < SATELLITE_RADIUS_SQUARED) {
-				renderColor.red = 1.0f;
-				renderColor.green = 1.0f;
-				renderColor.blue = 1.0f;
-				hitsSatellite = 1;
-				break;
-			}
-			else {
-				float weight = 1.0f / (distanceSquared * distanceSquared);
-				weights += weight;
-				if (distanceSquared < shortestDistanceSquared) {
-					shortestDistanceSquared = distanceSquared;
-					renderColor = satellites[j].identifier;
-				}
-			}
-		}
-
-		// Second graphics loop: Calculate the color based on distance to every satellite.
-		if (!hitsSatellite) {
-			for (int k = 0; k < SATELLITE_COUNT; ++k) {
-				floatvector difference = { .x = pixel.x - satellites[k].position.x,
-										  .y = pixel.y - satellites[k].position.y };
-				float dist2 = (difference.x * difference.x +
-					difference.y * difference.y);
-				float weight = 1.0f / (dist2 * dist2);
-
-				renderColor.red += (satellites[k].identifier.red *
-					weight / weights) * 3.0f;
-
-				renderColor.green += (satellites[k].identifier.green *
-					weight / weights) * 3.0f;
-
-				renderColor.blue += (satellites[k].identifier.blue *
-					weight / weights) * 3.0f;
-			}
-		}
-		pixels[i].red = (uint8_t)(renderColor.red * 255.0f);
-		pixels[i].green = (uint8_t)(renderColor.green * 255.0f);
-		pixels[i].blue = (uint8_t)(renderColor.blue * 255.0f);
-	}
+	// Read back results from the pixel buffer after kernel execution
+    status = clEnqueueReadBuffer(commandQueue, pixelBuffer, CL_TRUE, 0,
+        sizeof(color_u8) * SIZE, pixels, 0, NULL, NULL);
+    if (status != CL_SUCCESS) {
+        printf("Error reading results: %s\n", clErrorString(status));
+        abort(); 
+    }
 }
+
 
 // ## You may add your own destrcution routines here ##
 void destroy() {
-
-
+	clReleaseMemObject(pixelBuffer);
+	clReleaseMemObject(satelliteBuffer);
+	clReleaseKernel(graphicsKernel);
+	clReleaseProgram(program);
+	clReleaseCommandQueue(commandQueue);
+	clReleaseContext(context);
 }
-
-
-
-
-
 
 
 ////////////////////////////////////////////////
