@@ -432,6 +432,7 @@ void init() {
 	// Using the 1.2 clCreateCommandQueue API since it's bit simpler,
 	// this was later deprecated in OpenCL 2.0
 	commandQueue = clCreateCommandQueue(context, deviceIds[DEVICE_INDEX], 0, &status);
+
 	if (status != CL_SUCCESS) {
 		printf("Command queue creation error: %s", clErrorString(status));
 	}
@@ -586,14 +587,52 @@ void parallelPhysicsEngine() {
 // Rendering loop (This is called once a frame after physics engine) 
 // Decides the color for each pixel.
 void parallelGraphicsEngine() {
+    cl_int status;
 
+    // Write satellite data to GPU
+    status = clEnqueueWriteBuffer(commandQueue, satelliteBuffer, CL_TRUE, 0,
+        sizeof(satellite) * SATELLITE_COUNT, satellites, 0, NULL, NULL);
+    if (status != CL_SUCCESS) {
+        printf("Error writing satellite data: %s\n", clErrorString(status));
+        abort();
+    }
+
+    // Set kernel arguments
+    status = clSetKernelArg(kernel, 0, sizeof(cl_mem), &pixelBuffer);
+    status |= clSetKernelArg(kernel, 1, sizeof(cl_mem), &satelliteBuffer);
+    status |= clSetKernelArg(kernel, 2, sizeof(int), &mousePosX);
+    status |= clSetKernelArg(kernel, 3, sizeof(int), &mousePosY);
+    float blackHoleRadiusSquared = BLACK_HOLE_RADIUS * BLACK_HOLE_RADIUS;
+    status |= clSetKernelArg(kernel, 4, sizeof(float), &blackHoleRadiusSquared);
+    float satelliteRadiusSquared = SATELLITE_RADIUS * SATELLITE_RADIUS;
+    status |= clSetKernelArg(kernel, 5, sizeof(float), &satelliteRadiusSquared);
+    status |= clSetKernelArg(kernel, 6, sizeof(int), &satelliteCount);
+    
+    if (status != CL_SUCCESS) {
+        printf("Error setting kernel arguments: %s\n", clErrorString(status));
+        abort();
+    }
+
+    // Execute kernel
+    size_t globalWorkSize = SIZE;
+    status = clEnqueueNDRangeKernel(commandQueue, kernel, 1, NULL,
+        &globalWorkSize, NULL, 0, NULL, NULL);
+    if (status != CL_SUCCESS) {
+        printf("Error executing kernel: %s\n", clErrorString(status));
+        abort();
+    }
+
+    // Read back results
+    status = clEnqueueReadBuffer(commandQueue, pixelBuffer, CL_TRUE, 0,
+        sizeof(color_u8) * SIZE, pixels, 0, NULL, NULL);
+    if (status != CL_SUCCESS) {
+        printf("Error reading results: %s\n", clErrorString(status));
+        abort(); 
+    }
 }
 
 
 void parallelGraphicsEngineLegacy() {
-
-
-
 
 	int tmpMousePosX = mousePosX;
 	int tmpMousePosY = mousePosY;

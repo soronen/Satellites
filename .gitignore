@@ -3,3 +3,5 @@
 out/*
 logs/*
 SDL2-2.30.7/*
+build/*
+.vscode/*
