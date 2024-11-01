@@ -37,8 +37,8 @@ int mousePosX;
 int mousePosY;
 
 // These are used to decide the window size
-#define WINDOW_HEIGHT 1024
 #define WINDOW_WIDTH  1920
+#define WINDOW_HEIGHT 1080
 #define SIZE WINDOW_WIDTH*WINDOW_HEIGHT
 
 // The number of satellites can be changed to see how it affects performance.
@@ -108,7 +108,7 @@ satellite* backupSatelites;
 
 // ## You may add your own variables here ##
 // def work group size
-#define WORK_GROUP_SIZE {1, 1}
+#define WORK_GROUP_SIZE {16, 16}
 
 
 // set work group size
@@ -509,7 +509,12 @@ void init() {
 	}
 	printf("Max work group size: %d\n", maxWorkGroupSize);
 
+	if (localWorkSize[0] * localWorkSize[1] > maxWorkGroupSize) {
+		printf("Error: Work group size exceeds the maximum supported size of %zu\n", maxWorkGroupSize);
+		abort();
+	}
 
+	// pad the global work size to be multiple of local work size
 	globalWorkSize[0] = ((WINDOW_WIDTH + localWorkSize[0] - 1) / localWorkSize[0]) * localWorkSize[0];
 	globalWorkSize[1] = ((WINDOW_HEIGHT + localWorkSize[1] - 1) / localWorkSize[1]) * localWorkSize[1];
 	size_t totalWorkItems = globalWorkSize[0] * globalWorkSize[1];

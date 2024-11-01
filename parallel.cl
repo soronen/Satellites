@@ -39,7 +39,7 @@ __kernel void graphicsKernel(
     int i = y * windowWidth + x;
     floatvector pixel = (floatvector){ x, y };
 
-	// If work group size isn't a perfect multiple of window size, some threads will be out of bounds
+	// return in case pixel is outside the window bounds
     if (x >= windowWidth || y >= windowHeight) return;
 
 
@@ -109,3 +109,4 @@ __kernel void graphicsKernel(
         };
     }
 }
+

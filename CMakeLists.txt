@@ -13,8 +13,8 @@ add_executable(parallel parallel.c)
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
     target_compile_options(parallel PRIVATE 
-        "-Xclang"
-        "-ffast-math"
+         "-Xclang"
+         "-ffast-math"
         #"-Rpass=loop-vectorize"
         #"-Rpass-missed=loop-vectorize"
         #"-Rpass-analysis=loop-vectorize"
