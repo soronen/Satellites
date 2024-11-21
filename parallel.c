@@ -36,22 +36,8 @@ VERSION 24.0 - port to SDL2
 int mousePosX;
 int mousePosY;
 
-// These are used to decide the window size
-#define WINDOW_WIDTH  1920
-#define WINDOW_HEIGHT 1080
-#define SIZE WINDOW_WIDTH*WINDOW_HEIGHT
 
-// The number of satellites can be changed to see how it affects performance.
-// Benchmarks must be run with the original number of satellites
-#define SATELLITE_COUNT 64
-
-// These are used to control the satellite movement
-#define SATELLITE_RADIUS 3.16f
-#define MAX_VELOCITY 0.1f
-#define GRAVITY 1.0f
-#define DELTATIME 32
-#define PHYSICSUPDATESPERFRAME 100000
-#define BLACK_HOLE_RADIUS 4.5f
+#include "constants.h"
 
 
 
@@ -102,14 +88,9 @@ satellite* backupSatelites;
 
 
 
-
-
-
-
-// ## You may add your own variables here ##
-// def work group size
-#define WORK_GROUP_SIZE {16, 16}
-
+//
+//// ## You may add your own variables here ##
+const double DELTATIME_PER_PHYSICSUPDATESPERFRAME = (double)DELTATIME / PHYSICSUPDATESPERFRAME;
 
 // set work group size
 size_t localWorkSize[2] = WORK_GROUP_SIZE;
@@ -117,6 +98,9 @@ size_t localWorkSize[2] = WORK_GROUP_SIZE;
 // global work size must be multiple of local work size and also depends on the window size....
 size_t globalWorkSize[2];
 
+// physics work size 
+size_t localWorkSizePhysics = WORK_GROUP_SIZE_PHYSICS;
+size_t globalWorkSizePhysics;
 
 
 int satelliteCount = SATELLITE_COUNT;
@@ -125,11 +109,15 @@ int windowHeight = WINDOW_HEIGHT;
 float blackHoleRadius = BLACK_HOLE_RADIUS;
 float satelliteRadius = SATELLITE_RADIUS;
 
+float blackHoleRadiusSquared = BLACK_HOLE_RADIUS * BLACK_HOLE_RADIUS;
+float satelliteRadiusSquared = SATELLITE_RADIUS * SATELLITE_RADIUS;
+
 
 cl_context context;
 cl_command_queue commandQueue;
 cl_program program;
 cl_kernel graphicsKernel;
+cl_kernel physicsKernel;
 
 cl_mem pixelBuffer;
 cl_mem satelliteBuffer;
@@ -248,7 +236,17 @@ readSource(char* kernelPath) {
 	char* source;
 	long int size;
 	printf("Program file is: %s\n", kernelPath);
-	fp = fopen(kernelPath, "rb");
+
+	//fp = fopen(kernelPath, "rb");
+
+	errno_t err = fopen_s(&fp, kernelPath, "rb");
+
+	if (err != 0 || fp == NULL) {
+		fprintf(stderr, "Error: Failed to open file %s\n", kernelPath);
+		exit(EXIT_FAILURE);
+	}
+
+
 	if (!fp) {
 		printf("Could not open kernel file\n");
 		exit(-1);
@@ -443,7 +441,10 @@ void init() {
 	// In order command queue
 	// Using the 1.2 clCreateCommandQueue API since it's bit simpler,
 	// this was later deprecated in OpenCL 2.0
-	commandQueue = clCreateCommandQueue(context, deviceIds[DEVICE_INDEX], 0, &status);
+	//commandQueue = clCreateCommandQueue(context, deviceIds[DEVICE_INDEX], 0, &status);
+
+	cl_queue_properties properties[] = { CL_QUEUE_PROPERTIES, 0, 0 };
+	commandQueue = clCreateCommandQueueWithProperties(context, deviceIds[DEVICE_INDEX], properties, &status);
 
 	if (status != CL_SUCCESS) {
 		printf("Command queue creation error: %s", clErrorString(status));
@@ -487,6 +488,12 @@ void init() {
 		printf("Kernel creation error: %s\n", clErrorString(status));
 	}
 
+	// create physics kernel
+	physicsKernel = clCreateKernel(program, "physicsKernel", &status);
+	if (status != CL_SUCCESS) {
+		printf("Kernel creation error: %s\n", clErrorString(status));
+	}
+
 	// create buffers
 	satelliteBuffer = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(satellite) * SATELLITE_COUNT, NULL, &status);
 	if (status != CL_SUCCESS) {
@@ -494,7 +501,17 @@ void init() {
 		abort();
 	}
 
-	pixelBuffer = clCreateBuffer(context, CL_MEM_WRITE_ONLY, sizeof(color_u8) * SIZE, NULL, &status);
+#if USE_PHYSICS_KERNEL == 1
+	// Write the initial satellite data to the GPU. if parallel physics engine is used, this is not needed
+	status = clEnqueueWriteBuffer(commandQueue, satelliteBuffer, CL_TRUE, 0,
+		sizeof(satellite) * SATELLITE_COUNT, satellites, 0, NULL, NULL);
+	if (status != CL_SUCCESS) {
+		printf("Error writing initial satellite data: %s\n", clErrorString(status));
+		abort();
+	}
+#endif
+
+	pixelBuffer = clCreateBuffer(context, CL_MEM_WRITE_ONLY, sizeof(color_u8) * WINDOW_SIZE, NULL, &status);
 	if (status != CL_SUCCESS) {
 		printf("Error creating pixel buffer: %s\n", clErrorString(status));
 		abort();
@@ -526,10 +543,64 @@ void init() {
 	size_t outOfBoundsThreads = totalWorkItems - totalValidPixels;
 	printf("Out of bounds threads: %d\n", outOfBoundsThreads);
 
+	// same for physics work sizes
+	globalWorkSizePhysics = ((SATELLITE_COUNT + localWorkSizePhysics - 1) / localWorkSizePhysics) * localWorkSizePhysics;
+	printf("Total work items physics: %d\n", globalWorkSizePhysics);
+	size_t outOfBoundsThreadsPhysics = globalWorkSizePhysics - SATELLITE_COUNT;
+	printf("Out of bounds threads physics: %d\n", outOfBoundsThreadsPhysics);
+
+
 	free((void*)programSource);
 	free(platformId);
 	free(deviceIds);
 }
+
+
+
+void parallelPhyicsEngineGPU() {
+	cl_int status;
+
+	// Set kernel arguments
+	status = clSetKernelArg(physicsKernel, 0, sizeof(cl_mem), &satelliteBuffer);
+	status |= clSetKernelArg(physicsKernel, 1, sizeof(int), &mousePosX);
+	status |= clSetKernelArg(physicsKernel, 2, sizeof(int), &mousePosY);
+
+	if (status != CL_SUCCESS) {
+		printf("Error setting kernel arguments: %s\n", clErrorString(status));
+		abort();
+	}
+
+	status = clEnqueueNDRangeKernel(commandQueue, physicsKernel, 1, NULL,
+		&globalWorkSizePhysics, &localWorkSizePhysics, 0, NULL, NULL);
+
+	if (status != CL_SUCCESS) {
+		printf("Error executing kernel: %s\n", clErrorString(status));
+		abort();
+	}
+
+	// Read back results from the pixel buffer after kernel execution
+	//status = clEnqueueReadBuffer(commandQueue, satelliteBuffer, CL_TRUE, 0,
+	//	sizeof(satellite) * satelliteCount, satellites, 0, NULL, NULL);
+	//if (status != CL_SUCCESS) {
+	//	printf("Error reading results: %s\n", clErrorString(status));
+	//	abort();
+	//}
+
+	// write it back only for error checking in first 2 frames. after that no need
+	extern unsigned int frameNumber;
+	if (frameNumber < 2) {
+		// Ensure the kernel has finished executing before reading back data
+		clFinish(commandQueue);
+
+		status = clEnqueueReadBuffer(commandQueue, satelliteBuffer, CL_TRUE, 0,
+			sizeof(satellite) * satelliteCount, satellites, 0, NULL, NULL);
+		if (status != CL_SUCCESS) {
+			printf("Error reading satellite data: %s\n", clErrorString(status));
+			abort();
+		}
+	}
+}
+
 
 // ## You are asked to make this code parallel ##
 // Physics engine loop. (This is called once a frame before graphics engine) 
@@ -537,24 +608,18 @@ void init() {
 // This is done multiple times in a frame because the Euler integration 
 // is not accurate enough to be done only once
 void parallelPhysicsEngine() {
+	if (USE_PHYSICS_KERNEL) {
+		parallelPhyicsEngineGPU();
+		return;
+	}
 
 	int tmpMousePosX = mousePosX;
 	int tmpMousePosY = mousePosY;
-
-	// freeze if not cast as double
-	const double DELTATIME_PER_PHYSICSUPDATESPERFRAME = (double)DELTATIME / PHYSICSUPDATESPERFRAME;
-
-	// double precision required for accumulation inside this routine,
-	// but float storage is ok outside these loops.
-	//doublevector tmpPosition[SATELLITE_COUNT];
-	//doublevector tmpVelocity[SATELLITE_COUNT];
-
 
 	double tmpPosX[SATELLITE_COUNT];
 	double tmpPosY[SATELLITE_COUNT];
 	double tmpVelX[SATELLITE_COUNT];
 	double tmpVelY[SATELLITE_COUNT];
-
 
 	int idx;
 #pragma omp parallel for
@@ -618,58 +683,51 @@ void parallelPhysicsEngine() {
 
 }
 
+
 // ## You are asked to make this code parallel ##
 // Rendering loop (This is called once a frame after physics engine) 
 // Decides the color for each pixel.
 void parallelGraphicsEngine() {
-    cl_int status;
+	cl_int status;
 
-    // Write satellite data to GPU
-    status = clEnqueueWriteBuffer(commandQueue, satelliteBuffer, CL_TRUE, 0,
-        sizeof(satellite) * SATELLITE_COUNT, satellites, 0, NULL, NULL);
-    if (status != CL_SUCCESS) {
-        printf("Error writing satellite data: %s\n", clErrorString(status));
-        abort();
-    }
+	//Write satellite data to GPU. Comment out if you don't need to update satellite data (if you are using the physics kernel)
+#if USE_PHYSICS_KERNEL == 0
+	status = clEnqueueWriteBuffer(commandQueue, satelliteBuffer, CL_TRUE, 0,
+		sizeof(satellite) * SATELLITE_COUNT, satellites, 0, NULL, NULL);
+	if (status != CL_SUCCESS) {
+		printf("Error writing satellite data: %s\n", clErrorString(status));
+		abort();
+	}
+#endif
 
-    // Set kernel arguments
-    status = clSetKernelArg(graphicsKernel, 0, sizeof(cl_mem), &pixelBuffer);
-    status |= clSetKernelArg(graphicsKernel, 1, sizeof(cl_mem), &satelliteBuffer);
-    status |= clSetKernelArg(graphicsKernel, 2, sizeof(int), &mousePosX);
-    status |= clSetKernelArg(graphicsKernel, 3, sizeof(int), &mousePosY);
-    float blackHoleRadiusSquared = BLACK_HOLE_RADIUS * BLACK_HOLE_RADIUS;
-    status |= clSetKernelArg(graphicsKernel, 4, sizeof(float), &blackHoleRadiusSquared);
-    float satelliteRadiusSquared = SATELLITE_RADIUS * SATELLITE_RADIUS;
-    status |= clSetKernelArg(graphicsKernel, 5, sizeof(float), &satelliteRadiusSquared);
-    status |= clSetKernelArg(graphicsKernel, 6, sizeof(int), &satelliteCount);
-	status |= clSetKernelArg(graphicsKernel, 7, sizeof(int), &windowWidth);
-	status |= clSetKernelArg(graphicsKernel, 8, sizeof(int), &windowHeight);
+	// Set kernel arguments
+	status = clSetKernelArg(graphicsKernel, 0, sizeof(cl_mem), &pixelBuffer);
+	status |= clSetKernelArg(graphicsKernel, 1, sizeof(cl_mem), &satelliteBuffer);
+	status |= clSetKernelArg(graphicsKernel, 2, sizeof(int), &mousePosX);
+	status |= clSetKernelArg(graphicsKernel, 3, sizeof(int), &mousePosY);
 
+	if (status != CL_SUCCESS) {
+		printf("Error setting kernel arguments: %s\n", clErrorString(status));
+		abort();
+	}
 
-    
-    if (status != CL_SUCCESS) {
-        printf("Error setting kernel arguments: %s\n", clErrorString(status));
-        abort();
-    }
-	
 
 	// Execute graphicskernel
-
 	status = clEnqueueNDRangeKernel(commandQueue, graphicsKernel, 2, NULL,
 		globalWorkSize, localWorkSize, 0, NULL, NULL);
 
-    if (status != CL_SUCCESS) {
-        printf("Error executing kernel: %s\n", clErrorString(status));
-        abort();
-    }
+	if (status != CL_SUCCESS) {
+		printf("Error executing kernel: %s\n", clErrorString(status));
+		abort();
+	}
 
 	// Read back results from the pixel buffer after kernel execution
-    status = clEnqueueReadBuffer(commandQueue, pixelBuffer, CL_TRUE, 0,
-        sizeof(color_u8) * SIZE, pixels, 0, NULL, NULL);
-    if (status != CL_SUCCESS) {
-        printf("Error reading results: %s\n", clErrorString(status));
-        abort(); 
-    }
+	status = clEnqueueReadBuffer(commandQueue, pixelBuffer, CL_TRUE, 0,
+		sizeof(color_u8) * WINDOW_SIZE, pixels, 0, NULL, NULL);
+	if (status != CL_SUCCESS) {
+		printf("Error reading results: %s\n", clErrorString(status));
+		abort();
+	}
 }
 
 
@@ -678,6 +736,7 @@ void destroy() {
 	clReleaseMemObject(pixelBuffer);
 	clReleaseMemObject(satelliteBuffer);
 	clReleaseKernel(graphicsKernel);
+	clReleaseKernel(physicsKernel);
 	clReleaseProgram(program);
 	clReleaseCommandQueue(commandQueue);
 	clReleaseContext(context);
@@ -702,7 +761,7 @@ unsigned int seed = 0;
 // Sequential rendering loop used for finding errors
 void sequentialGraphicsEngine() {
 	// Graphics pixel loop
-	for (int i = 0; i < SIZE; ++i) {
+	for (int i = 0; i < WINDOW_SIZE; ++i) {
 
 		// Row wise ordering
 		floatvector pixel = { .x = i % WINDOW_WIDTH, .y = i / WINDOW_WIDTH };
@@ -848,7 +907,7 @@ void sequentialPhysicsEngine(satellite* s) {
 // ¤¤ DO NOT EDIT THIS FUNCTION ¤¤
 void errorCheck() {
 	int countErrors = 0;
-	for (unsigned int i = 0; i < SIZE; ++i) {
+	for (unsigned int i = 0; i < WINDOW_SIZE; ++i) {
 		if (abs(correctPixels[i].red - pixels[i].red) > ALLOWED_ERROR ||
 			abs(correctPixels[i].green - pixels[i].green) > ALLOWED_ERROR ||
 			abs(correctPixels[i].blue - pixels[i].blue) > ALLOWED_ERROR) {
@@ -947,10 +1006,10 @@ void fixedInit(unsigned int seed) {
 	}
 
 	// Init pixel buffer which is rendered to the widow
-	pixels = (color_u8*)malloc(sizeof(color_u8) * SIZE);
+	pixels = (color_u8*)malloc(sizeof(color_u8) * WINDOW_SIZE);
 
 	// Init pixel buffer which is used for error checking
-	correctPixels = (color_u8*)malloc(sizeof(color_u8) * SIZE);
+	correctPixels = (color_u8*)malloc(sizeof(color_u8) * WINDOW_SIZE);
 
 	backupSatelites = (satellite*)malloc(sizeof(satellite) * SATELLITE_COUNT);
 
@@ -1055,4 +1114,5 @@ int main(int argc, char** argv) {
 	}
 	SDL_Quit();
 	fixedDestroy();
+	return 0;
 }

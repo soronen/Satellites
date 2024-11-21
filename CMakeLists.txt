@@ -61,17 +61,24 @@ target_link_libraries(parallel OpenMP::OpenMP_C)
  target_include_directories(parallel PRIVATE ${OpenCL_INCLUDE_DIRS})
  target_link_libraries(parallel ${OpenCL_LIBRARIES})
 
-## copy every parallel.cl every time
+## copy every parallel.cl and constants.h every time
 add_custom_command(
     OUTPUT "${CMAKE_BINARY_DIR}/parallel.cl"
     COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/parallel.cl" "${CMAKE_BINARY_DIR}"
     DEPENDS "${CMAKE_SOURCE_DIR}/parallel.cl"
+
+    OUTPUT "${CMAKE_BINARY_DIR}/constants.h"
+    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/constants.h" "${CMAKE_BINARY_DIR}"
+    DEPENDS "${CMAKE_SOURCE_DIR}/constants.h"
+
     VERBATIM
 )
-
 # Add this output to the list of dependencies for the parallel target
 add_custom_target(copy_parallel_cl ALL DEPENDS "${CMAKE_BINARY_DIR}/parallel.cl")
 add_dependencies(parallel copy_parallel_cl)
+
+add_custom_target(copy_constants_h ALL DEPENDS "${CMAKE_BINARY_DIR}/constants.h")
+add_dependencies(parallel copy_constants_h)
 
 # Find and link SDL2
 if (WIN32)
